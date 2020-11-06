@@ -1,6 +1,8 @@
 #ifndef BESS_MODULES_HHD_H_
 #define BESS_MODULES_HHD_H_
 
+#include "../module.h"
+
 #include "../utils/ether.h"
 #include "../utils/ip.h"
 #include "../utils/udp.h"
