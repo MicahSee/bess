@@ -15,7 +15,7 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
 
     using flow = bess::pb::Flow;
 
-    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::pair<uint64_, uint64_t>>::iterator it;
+    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::pair<uint64_t, uint64_t>>::iterator it;
     int counter = 0; //only for testing
 
     for (it = flow_map.begin(); counter < 2; it++) //for now this method only returns the first two flows                                          
