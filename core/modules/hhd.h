@@ -23,6 +23,7 @@ using bess::utils::Ipv4;
 //using bess::utils::Icmp;
 //using bess::utils::Tcp;
 using bess::utils::Udp;
+using bess::utils::ToIpv4Address;
 
 class HHD final : public Module
 {
@@ -38,10 +39,10 @@ public:
     //should I include the other command response methods?
 
 private:
-    uint64_t last_tsc_; //what value should I initalize this variable with
+    uint64_t last_tsc_ = 0;//what value should I initalize this variable with
 
-    //first item in pair is packet count and second item is pps
-    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::pair<uint64_t, uint64_t>> flow_map;
+    //items in second tuple: current packet count, prev packet count, pps
+    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t>> flow_map_;
 };
 
 #endif
