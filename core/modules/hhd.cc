@@ -15,25 +15,29 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
 
     using flow = bess::pb::Flow;
 
-    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::pair<uint64_t, uint64_t>>::iterator it;
+    //beginning of test code
+    auto it;
     int counter = 0; //only for testing
 
-    for (it = flow_map.begin(); counter < 2; it++) //for now this method only returns the first two flows                                          
+    for (it = flow_map_.begin(); counter < 2; it++) //for now this method only returns the first two flows                                          
     {                                              //and their packet count
         flow *f = r.add_top_flows();
 
-        std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t> key;
-        key = it->first;
+        auto key = it->first; //5 tuple key
 
-        f->set_src_ip(std::get<1>(key));
-        f->set_dst_ip(std::get<2>(key));
-        f->set_ip_proto(std::get<3>(key));
-        f->set_src_port(std::get<4>(key));
-        f->set_dst_port(std::get<5>(key));
-        f->set_pkt_count(it->second);
+        string src_ip = ToIpv4Address(std::get<1>(key));
+        string dst_ip = ToIpv4Address(std::get<2>(key));
+
+        f->set_src_ip(src_ip);
+        f->set_dst_ip(dst_ip);
+        f->set_ip_proto((int) std::get<3>(key));
+        //f->set_src_port(std::get<4>(key));
+        //f->set_dst_port(std::get<5>(key));
+        //f->set_pkt_count(it->second);
 
         counter++; //only for testing
     }
+    //end of test code
 
     return CommandSuccess(r);
 }
@@ -53,40 +57,49 @@ void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
         size_t ip_bytes = ip->header_length << 2;
         Udp *udp = reinterpret_cast<Udp *>(reinterpret_cast<uint8_t *>(ip) + ip_bytes);
 
-        //do I need to use an object different than Udp for different ip protocols?
-        std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t> current_flow(ip->src, ip->dst, ip->protocol, udp->src_port, udp->dst_port);
+        auto current_flow(ip->src, ip->dst, ip->protocol, udp->src_port, udp->dst_port);
 
-        std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::pair<uint64_t, uint64_t>>::iterator it = flow_map.find(current_flow);
-        std::vector<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>> updated_flows;
-        
-        std::pair<uint64_t, uint64_t> new_pair;
+        auto it = flow_map_.find(current_flow);
+        auto key = it->first;
 
-        if (it != flow_map.end())
+        if (it != flow_map_.end())
         {
-            updated_flows.push_back(current_flow);
-            (it->second).first++;
+            (std::get<0>(key))++; //update current packet count
         }
         else
         {
-            new_pair = std::make_pair(1, 0);
-            flow_map.insert(std::make_pair(current_flow, new_pair)); //make new pair here
+            //create new flow if it doesn't already exist
+            std::tuple<uint64_t, uint64_t, uint64_t> new_val(1, 0, 0);
+            flow_map_.insert(std::make_pair(current_flow, new_val));
         }
 
-        //calculate pps
-        uint64_t elapsed_cycles = rdtsc() - last_tsc_;
-        last_tsc_ = tsc;
-
-        uint64_t elapsed_time = tsc_to_ns(elapsed_cycles) / 1e9;
-
-        for (auto i = updated_flows.begin(); i != updated_flows.end(); i++) {
-            it = flow_map.find(current_flow);
-
-            //assume flow exists
-            (it->second).second = (it->second).first / elapsed_time;
-        }
-
-        //emit packet
         EmitPacket(ctx, pkt, incoming_gate);
+    }
+
+    //
+    uint64_t elapsed_cycles = rdtsc() - last_tsc_;
+    uint64_t elapsed_time = tsc_to_ns(elapsed_cycles) / 1e9; //this time is in seconds
+
+    //update flow_map_ every 10ms
+    if (elapsed_time * 1000 >= 10) {
+        
+        //per flow actions
+        for (auto j = flow_map_.begin(); j != flow_map_.end(); j++) {
+            
+            auto values = j->second;
+            uint64_t curr_pkt_cnt = std::get<0>(values);
+            uint64_t prev_pkt_cnt = std::get<1>(values);
+
+            if (curr_pkt_cnt > prev_pkt_cnt) {
+                std::get<2>(values) = (curr_pkt_cnt - prev_pkt_cnt) / elapsed_time; //calculate pps
+
+                //set prev pkt cnt to current pkt cnt
+                std::get<1>(values) = std::get<0>(values);
+            }
+        }
+
+        //update tsc
+        last_tsc_ = rdtsc();
     }
 }
 
