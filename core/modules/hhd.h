@@ -9,10 +9,12 @@
 #include "../utils/udp.h"
 #include "../utils/endian.h"
 #include "../utils/time.h"
+#include "../utils/mcslock.h"
 
 #include <map>
 #include <tuple>
-#include <vector>
+#include <string>
+#include <iostream>
 
 using bess::utils::be16_t;
 using bess::utils::be32_t;
@@ -43,6 +45,9 @@ private:
 
     //items in second tuple: current packet count, prev packet count, pps
     std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t>> flow_map_;
+
+    mcslock lock_;
 };
 
 #endif
+

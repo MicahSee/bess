@@ -6,44 +6,119 @@ const Commands HHD::cmds = {
 
 CommandResponse HHD::Init(const bess::pb::EmptyArg &)
 {
+    mcs_lock_init(&lock_);
+
     return CommandSuccess();
 }
 
 CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
 {
+    mcslock_node_t mynode;
+    mcs_lock(&lock_, &mynode);
+
     bess::pb::HHDCommandGetSummaryResponse r;
 
     using flow = bess::pb::Flow;
 
-    //beginning of test code
-    auto it;
-    int counter = 0; //only for testing
 
-    for (it = flow_map_.begin(); counter < 2; it++) //for now this method only returns the first two flows                                          
-    {                                              //and their packet count
-        flow *f = r.add_top_flows();
+    //begin section for finding the top ten flows with the highest packet rate
+    std::pair<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t>> top_flows[10];
 
-        auto key = it->first; //5 tuple key
+    uint64_t min_pps;
+    int min_idx;
+    int count = 0;
 
-        string src_ip = ToIpv4Address(std::get<1>(key));
-        string dst_ip = ToIpv4Address(std::get<2>(key));
+    for (auto it = flow_map_.begin(); it != flow_map_.end(); it++)
+    {
+        auto vals = it->second;
+        uint64_t comp_pps = std::get<2>(vals);
+
+        if (count < 5) {
+            top_flows[count] = std::make_pair(it->first, it->second);
+            count++;
+            continue;
+        }
+
+        auto min_vals = (top_flows[0]).second;
+        min_pps = std::get<2>(min_vals);
+        min_idx = 0;
+
+        for (int i = 1; i < 10; i++) {
+            auto top_flow_vals = (top_flows[i]).second;
+            uint64_t top_flow_pps = std::get<2>(top_flow_vals);
+
+            if (top_flow_pps < min_pps) {
+                min_pps = top_flow_pps;
+                min_idx = i;
+            }
+        }
+
+        if (comp_pps > min_pps) {
+            top_flows[min_idx] = std::make_pair(it->first, it->second);
+        }
+    }
+
+    int operations;
+    do
+    {
+        operations = 0;
+
+        for (int i = 0; i < 9; i++) {
+            auto first_vals = (top_flows[i]).second;
+            uint64_t first_pps = std::get<2>(first_vals);
+
+            auto second_vals = (top_flows[i+1]).second;
+            uint64_t second_pps = std::get<2>(second_vals);
+
+            if (second_pps > first_pps) {
+                auto temp = top_flows[i];
+
+                top_flows[i] = top_flows[i+1];
+                top_flows[i+1] = temp;
+
+                operations++;
+            }
+        }
+    } while (operations > 0);
+    //end of section
+
+    r.set_num_flows_in_table(flow_map_.size());
+
+    auto first_flow_vals = (top_flows[0]).second;
+    uint64_t first_flow_pps = std::get<2>(first_flow_vals);
+    r.set_top_packet_rate(first_flow_pps);
+
+    for (int i = 0; i < count; i++)
+    {
+	flow *f = r.add_flow();
+        auto key = (top_flows[i]).first;
+	auto val = (top_flows[i]).second;
+
+        std::string src_ip = ToIpv4Address(std::get<0>(key));
+        std::string dst_ip = ToIpv4Address(std::get<1>(key));
+
+	uint16_t src_port = (std::get<3>(key)).raw_value(); 
+	uint16_t dst_port = (std::get<4>(key)).raw_value();
 
         f->set_src_ip(src_ip);
         f->set_dst_ip(dst_ip);
-        f->set_ip_proto((int) std::get<3>(key));
-        //f->set_src_port(std::get<4>(key));
-        //f->set_dst_port(std::get<5>(key));
+        f->set_ip_proto((int) std::get<2>(key));
+        f->set_src_port(src_port);
+        f->set_dst_port(dst_port);
+	f->set_pps(std::get<2>(val));
         //f->set_pkt_count(it->second);
-
-        counter++; //only for testing
     }
-    //end of test code
+
+    mcs_unlock(&lock_, &mynode);
 
     return CommandSuccess(r);
 }
 
 void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
 {
+    mcslock_node_t mynode;
+    mcs_lock(&lock_, &mynode);
+
     gate_idx_t incoming_gate = ctx->current_igate;
 
     int cnt = batch->cnt();
@@ -57,18 +132,25 @@ void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
         size_t ip_bytes = ip->header_length << 2;
         Udp *udp = reinterpret_cast<Udp *>(reinterpret_cast<uint8_t *>(ip) + ip_bytes);
 
-        auto current_flow(ip->src, ip->dst, ip->protocol, udp->src_port, udp->dst_port);
+        std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t> current_flow(ip->src, ip->dst, ip->protocol, udp->src_port, udp->dst_port);
 
         auto it = flow_map_.find(current_flow);
-        auto key = it->first;
 
         if (it != flow_map_.end())
         {
-            (std::get<0>(key))++; //update current packet count
+	        auto values = &(it->second);
+            std::get<0>(*values) += 1;
+
+            //debugging code
+            //std::string src_ip = ToIpv4Address(std::get<0>(key));
+            //std::string dst_ip = ToIpv4Address(std::get<1>(key));
+
+            //std::cout << "src: " << src_ip << " dst: " << dst_ip << " pkt cnt: " << std::get<0>(values) << std::endl;
         }
         else
         {
             //create new flow if it doesn't already exist
+            //std::cout << "new flow created" << std::endl;
             std::tuple<uint64_t, uint64_t, uint64_t> new_val(1, 0, 0);
             flow_map_.insert(std::make_pair(current_flow, new_val));
         }
@@ -76,7 +158,6 @@ void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
         EmitPacket(ctx, pkt, incoming_gate);
     }
 
-    //
     uint64_t elapsed_cycles = rdtsc() - last_tsc_;
     uint64_t elapsed_time = tsc_to_ns(elapsed_cycles) / 1e9; //this time is in seconds
 
@@ -84,23 +165,36 @@ void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
     if (elapsed_time * 1000 >= 10) {
         
         //per flow actions
-        for (auto j = flow_map_.begin(); j != flow_map_.end(); j++) {
+        for (auto flow_it = flow_map_.begin(); flow_it != flow_map_.end(); flow_it++) {
             
-            auto values = j->second;
-            uint64_t curr_pkt_cnt = std::get<0>(values);
-            uint64_t prev_pkt_cnt = std::get<1>(values);
+            auto values = &(flow_it->second);
+            uint64_t curr_pkt_cnt = std::get<0>(*values);
+            uint64_t prev_pkt_cnt = std::get<1>(*values);
 
             if (curr_pkt_cnt > prev_pkt_cnt) {
-                std::get<2>(values) = (curr_pkt_cnt - prev_pkt_cnt) / elapsed_time; //calculate pps
+                uint64_t pps = (curr_pkt_cnt - prev_pkt_cnt) / elapsed_time;
+
+                std::get<2>(*values) = pps; //calculate pps
 
                 //set prev pkt cnt to current pkt cnt
-                std::get<1>(values) = std::get<0>(values);
+                
+                //alternative approach: set back to 0 to prevent pkt cnt from getting too large
+                //std::get<0>(*values) = 0;
+                //std::get<1>(*values) = 0;
+
+                std::get<1>(*values) = std::get<0>(*values);
+            } else {
+                //Remove expired flows. Should the expire timer be longer than 10ms?
+                flow_map_.erase(flow_it++);
             }
         }
 
         //update tsc
         last_tsc_ = rdtsc();
     }
+
+    mcs_unlock(&lock_, &mynode);
 }
 
 ADD_MODULE(HHD, "hhd", "detect heavy usage flows")
+
