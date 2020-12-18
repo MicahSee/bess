@@ -32,7 +32,7 @@ class HHD final : public Module
 public:
     static const Commands cmds;
 
-    CommandResponse Init(const bess::pb::EmptyArg &); //define arg in module_msg.proto
+    CommandResponse Init(const bess::pb::HHDArg &); //define arg in module_msg.proto
 
     CommandResponse CommandGetSummary(const bess::pb::EmptyArg &);
 
@@ -41,13 +41,12 @@ public:
     //should I include the other command response methods?
 
 private:
-    uint64_t last_tsc_ = 0;//what value should I initalize this variable with
+    double timeout_ = 1.0;
 
-    //items in second tuple: current packet count, prev packet count, pps
-    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t>> flow_map_;
+    //items in second tuple: current packet count, prev packet count, pps, current timestamp, previous timestamp
+    std::map<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>> flow_map_;
 
     mcslock lock_;
 };
 
 #endif
-
