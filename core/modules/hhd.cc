@@ -4,8 +4,10 @@ const Commands HHD::cmds = {
     {"get_summary", "HHDCommandGetSummaryArg",
      MODULE_CMD_FUNC(&HHD::CommandGetSummary), Command::THREAD_SAFE}};
 
-CommandResponse HHD::Init(const bess::pb::EmptyArg &)
+CommandResponse HHD::Init(const bess::pb::HHDArg &arg)
 {
+    timeout_ = arg.timeout();    
+
     mcs_lock_init(&lock_);
 
     return CommandSuccess();
@@ -20,9 +22,7 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
 
     using flow = bess::pb::Flow;
 
-
-    //begin section for finding the top ten flows with the highest packet rate
-    std::pair<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t>> top_flows[10];
+    std::pair<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>> top_flows[10];
 
     uint64_t min_pps;
     int min_idx;
@@ -80,7 +80,6 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
             }
         }
     } while (operations > 0);
-    //end of section
 
     r.set_num_flows_in_table(flow_map_.size());
 
@@ -90,23 +89,22 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
 
     for (int i = 0; i < count; i++)
     {
-	flow *f = r.add_flow();
+	    flow *f = r.add_flow();
         auto key = (top_flows[i]).first;
-	auto val = (top_flows[i]).second;
+	    auto val = (top_flows[i]).second;
 
         std::string src_ip = ToIpv4Address(std::get<0>(key));
         std::string dst_ip = ToIpv4Address(std::get<1>(key));
 
-	uint16_t src_port = (std::get<3>(key)).raw_value(); 
-	uint16_t dst_port = (std::get<4>(key)).raw_value();
+        uint16_t src_port = (std::get<3>(key)).raw_value(); 
+	    uint16_t dst_port = (std::get<4>(key)).raw_value();
 
         f->set_src_ip(src_ip);
         f->set_dst_ip(dst_ip);
         f->set_ip_proto((int) std::get<2>(key));
         f->set_src_port(src_port);
         f->set_dst_port(dst_port);
-	f->set_pps(std::get<2>(val));
-        //f->set_pkt_count(it->second);
+	    f->set_pps(std::get<2>(val));
     }
 
     mcs_unlock(&lock_, &mynode);
@@ -138,63 +136,52 @@ void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
 
         if (it != flow_map_.end())
         {
-	        auto values = &(it->second);
+	    auto values = &(it->second);
             std::get<0>(*values) += 1;
-
-            //debugging code
-            //std::string src_ip = ToIpv4Address(std::get<0>(key));
-            //std::string dst_ip = ToIpv4Address(std::get<1>(key));
-
-            //std::cout << "src: " << src_ip << " dst: " << dst_ip << " pkt cnt: " << std::get<0>(values) << std::endl;
+            std::get<3>(*values) = rdtsc();
         }
         else
         {
-            //create new flow if it doesn't already exist
-            //std::cout << "new flow created" << std::endl;
-            std::tuple<uint64_t, uint64_t, uint64_t> new_val(1, 0, 0);
+            uint64_t timestamp = rdtsc();
+            std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> new_val(1, 0, 0, timestamp, timestamp);
             flow_map_.insert(std::make_pair(current_flow, new_val));
         }
 
         EmitPacket(ctx, pkt, incoming_gate);
     }
-
-    uint64_t elapsed_cycles = rdtsc() - last_tsc_;
-    uint64_t elapsed_time = tsc_to_ns(elapsed_cycles) / 1e9; //this time is in seconds
-
-    //update flow_map_ every 10ms
-    if (elapsed_time * 1000 >= 10) {
+    
+    for (auto flow_it = flow_map_.begin(); flow_it != flow_map_.end(); flow_it++) {
         
-        //per flow actions
-        for (auto flow_it = flow_map_.begin(); flow_it != flow_map_.end(); flow_it++) {
-            
-            auto values = &(flow_it->second);
-            uint64_t curr_pkt_cnt = std::get<0>(*values);
-            uint64_t prev_pkt_cnt = std::get<1>(*values);
+        auto values = &(flow_it->second);
+        
+        uint64_t curr_timestamp = std::get<3>(*values);
+        uint64_t prev_timestamp = std::get<4>(*values);
+	    double elapsed_time = tsc_to_ns(curr_timestamp - prev_timestamp) / 1.0e9;
+	    double time_since_last_packet = tsc_to_ns(rdtsc() - curr_timestamp) / 1.0e9;
 
-            if (curr_pkt_cnt > prev_pkt_cnt) {
-                uint64_t pps = (curr_pkt_cnt - prev_pkt_cnt) / elapsed_time;
-
-                std::get<2>(*values) = pps; //calculate pps
-
-                //set prev pkt cnt to current pkt cnt
-                
-                //alternative approach: set back to 0 to prevent pkt cnt from getting too large
-                //std::get<0>(*values) = 0;
-                //std::get<1>(*values) = 0;
-
-                std::get<1>(*values) = std::get<0>(*values);
-            } else {
-                //Remove expired flows. Should the expire timer be longer than 10ms?
-                flow_map_.erase(flow_it++);
-            }
+        if (time_since_last_packet >= timeout_) {
+            flow_map_.erase(flow_it++);
         }
 
-        //update tsc
-        last_tsc_ = rdtsc();
+        uint64_t curr_pkt_cnt = std::get<0>(*values);
+        uint64_t prev_pkt_cnt = std::get<1>(*values);
+
+        if (curr_pkt_cnt > prev_pkt_cnt && (elapsed_time*1000) > 20.0) {
+            //calculate pps
+            uint64_t pps = (curr_pkt_cnt - prev_pkt_cnt) / elapsed_time;
+
+            //set pps
+            std::get<2>(*values) = pps;
+
+            //swap packet counts
+            std::get<1>(*values) = std::get<0>(*values);
+            
+            //swap timestamps
+            std::get<4>(*values) = std::get<3>(*values);
+        }
     }
 
     mcs_unlock(&lock_, &mynode);
 }
 
 ADD_MODULE(HHD, "hhd", "detect heavy usage flows")
-
