@@ -18,10 +18,7 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
     mcslock_node_t mynode;
     mcs_lock(&lock_, &mynode);
 
-    bess::pb::HHDCommandGetSummaryResponse r;
-
-    using flow = bess::pb::Flow;
-
+    //find top 10 flows by packet rate
     std::pair<std::tuple<be32_t, be32_t, uint8_t, be16_t, be16_t>, std::tuple<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t>> top_flows[10];
 
     uint64_t min_pps;
@@ -30,10 +27,25 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
 
     for (auto it = flow_map_.begin(); it != flow_map_.end(); it++)
     {
-        auto vals = it->second;
-        uint64_t comp_pps = std::get<2>(vals);
+        auto vals = &(it->second);
 
-        if (count < 5) {
+        //calc pps
+        uint64_t curr_timestamp = std::get<3>(*vals);
+        uint64_t prev_timestamp = std::get<4>(*vals);
+        double elapsed_time = tsc_to_ns(curr_timestamp - prev_timestamp) / 1.0e9;
+
+        uint64_t curr_pkt_cnt = std::get<0>(*vals);
+
+        uint64_t comp_pps = 0;
+
+        if (elapsed_time * 1000 >= 20.0) {
+            comp_pps = (curr_pkt_cnt - 1) / elapsed_time;
+        }
+        //end calc pps
+
+        std::get<2>(*vals) = comp_pps;
+
+        if (count < 10) { //change this to get the top 10 flows rather than the top 5?
             top_flows[count] = std::make_pair(it->first, it->second);
             count++;
             continue;
@@ -80,6 +92,12 @@ CommandResponse HHD::CommandGetSummary(const bess::pb::EmptyArg &)
             }
         }
     } while (operations > 0);
+
+
+    //set response data
+    bess::pb::HHDCommandGetSummaryResponse r;
+
+    using flow = bess::pb::Flow;
 
     r.set_num_flows_in_table(flow_map_.size());
 
@@ -149,36 +167,22 @@ void HHD::ProcessBatch(Context *ctx, bess::PacketBatch *batch)
 
         EmitPacket(ctx, pkt, incoming_gate);
     }
-    
-    for (auto flow_it = flow_map_.begin(); flow_it != flow_map_.end(); flow_it++) {
+   
+    if ((tsc_to_ns(rdtsc() - last_run_) / 1.0e9) * 1000 >= 50.0) {
+
+    	for (auto flow_it = flow_map_.begin(); flow_it != flow_map_.end(); flow_it++) {
         
-        auto values = &(flow_it->second);
-        
-        uint64_t curr_timestamp = std::get<3>(*values);
-        uint64_t prev_timestamp = std::get<4>(*values);
-	    double elapsed_time = tsc_to_ns(curr_timestamp - prev_timestamp) / 1.0e9;
-	    double time_since_last_packet = tsc_to_ns(rdtsc() - curr_timestamp) / 1.0e9;
+	        auto values = &(flow_it->second);
+	        
+	        uint64_t curr_timestamp = std::get<3>(*values);
+		    double time_since_last_packet = tsc_to_ns(rdtsc() - curr_timestamp) / 1.0e9;
 
-        if (time_since_last_packet >= timeout_) {
-            flow_map_.erase(flow_it++);
-        }
+	        if (time_since_last_packet >= timeout_) {
+	            flow_map_.erase(flow_it++);
+	        }
+    	}
 
-        uint64_t curr_pkt_cnt = std::get<0>(*values);
-        uint64_t prev_pkt_cnt = std::get<1>(*values);
-
-        if (curr_pkt_cnt > prev_pkt_cnt && (elapsed_time*1000) > 20.0) {
-            //calculate pps
-            uint64_t pps = (curr_pkt_cnt - prev_pkt_cnt) / elapsed_time;
-
-            //set pps
-            std::get<2>(*values) = pps;
-
-            //swap packet counts
-            std::get<1>(*values) = std::get<0>(*values);
-            
-            //swap timestamps
-            std::get<4>(*values) = std::get<3>(*values);
-        }
+		last_run_ = rdtsc();
     }
 
     mcs_unlock(&lock_, &mynode);
